@@ -2550,28 +2550,129 @@ suite('ReactiveElement', () => {
     assert.equal(a.getAttribute('bar'), 'yo');
   });
 
-  test('addInitializer', () => {
-    class A extends ReactiveElement {
-      prop1?: string;
-      prop2?: string;
-      event?: string;
-    }
-    A.addInitializer((a) => {
-      (a as A).prop1 = 'prop1';
+  suite('addInitializer', () => {
+    test('extends construction', () => {
+      class A extends ReactiveElement {
+        prop1?: string;
+        prop2?: string;
+        event?: string;
+      }
+      A.addInitializer((a) => {
+        (a as A).prop1 = 'prop1';
+      });
+      A.addInitializer((a) => {
+        (a as A).prop2 = 'prop2';
+      });
+      A.addInitializer((a) => {
+        a.addEventListener('click', (e) => ((a as A).event = e.type));
+      });
+      customElements.define(generateElementName(), A);
+      const a = new A();
+      container.appendChild(a);
+      assert.equal(a.prop1, 'prop1');
+      assert.equal(a.prop2, 'prop2');
+      a.dispatchEvent(new Event('click'));
+      assert.equal(a.event, 'click');
     });
-    A.addInitializer((a) => {
-      (a as A).prop2 = 'prop2';
+
+    type Derived = new () => ReactiveElement;
+    let effects: string[];
+
+    const initializer = (klass: string) => (i: ReactiveElement) => {
+      i.addEventListener('click', ({target}) => {
+        effects.push(
+          `${target?.constructor.name} clicked, ${klass} initializer`
+        );
+      });
+    };
+    const makeFixtures = (...classes: Derived[]) =>
+      classes.map((E) => {
+        customElements.define(generateElementName(), E);
+        const e = new E();
+        container.append(e);
+        return e;
+      });
+
+    setup(() => {
+      effects = [];
     });
-    A.addInitializer((a) => {
-      a.addEventListener('click', (e) => ((a as A).event = e.type));
+
+    suite(
+      'allows subclasses to inherit initializers and prevents them from leaking their initializers to superclasses',
+      () => {
+        const buildAndAssert = (A: Derived, B: Derived) => {
+          const [a, b] = makeFixtures(A, B);
+          a.click();
+          b.click();
+          assert.deepEqual(effects, [
+            'A clicked, A initializer',
+            'B clicked, A initializer',
+            'B clicked, B initializer',
+          ]);
+        };
+
+        test('when a superclass initializer is attached first', () => {
+          class A extends ReactiveElement {}
+          class B extends A {}
+          A.addInitializer(initializer('A'));
+          B.addInitializer(initializer('B'));
+          buildAndAssert(A, B);
+        });
+
+        test('when a subclass initializer is attached first', () => {
+          class A extends ReactiveElement {}
+          class B extends A {}
+          B.addInitializer(initializer('B'));
+          A.addInitializer(initializer('A'));
+          buildAndAssert(A, B);
+        });
+      }
+    );
+
+    test('prevents sibling classes from leaking initializers to each other, and attachment order does not matter', () => {
+      class A extends ReactiveElement {}
+      class B extends A {}
+      class C extends A {}
+      B.addInitializer(initializer('B')); // before superclass A
+      A.addInitializer(initializer('A'));
+      C.addInitializer(initializer('C')); // after superclass A
+      const [_a, b, c] = makeFixtures(A, B, C); // eslint-disable-line @typescript-eslint/no-unused-vars
+      b.click();
+      c.click();
+      assert.deepEqual(effects, [
+        'B clicked, A initializer',
+        'B clicked, B initializer',
+        'C clicked, A initializer',
+        'C clicked, C initializer',
+      ]);
     });
-    customElements.define(generateElementName(), A);
-    const a = new A();
-    container.appendChild(a);
-    assert.equal(a.prop1, 'prop1');
-    assert.equal(a.prop2, 'prop2');
-    a.dispatchEvent(new Event('click'));
-    assert.equal(a.event, 'click');
+
+    test('allows initializers to be added by class decorators', () => {
+      const deco = (target: typeof E) => {
+        effects.push(`target ${target.name}`);
+        target.addInitializer((element) => {
+          effects.push(`instance ${element.constructor.name}`);
+          element.addEventListener('click', ({type}) => {
+            effects.push(`event ${type}`);
+          });
+        });
+      };
+      @deco
+      class E extends ReactiveElement {
+        constructor() {
+          super();
+          effects.push(`constructed ${this.constructor.name}`);
+        }
+      }
+      const [e] = makeFixtures(E);
+      e.click();
+      assert.deepEqual(effects, [
+        'target E',
+        'instance E',
+        'constructed E',
+        'event click',
+      ]);
+    });
   });
 
   suite('exceptions', () => {
